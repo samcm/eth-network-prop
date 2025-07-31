@@ -611,9 +611,10 @@ def create_cdf_chart_polars(data_pl, title_prefix):
 def main():
     print("[DEBUG] main() started", file=sys.stderr)
     log_memory_usage("Start of main()")
-    st.title("🌐 Network Data Availability Analysis")
-    st.markdown("Analyzing when data becomes available (block + all blobs) across the Ethereum network.")
+    st.title("🌐 Network Data Analysis")
+    st.markdown("This app analyzes when data becomes available (block + all blobs) across the Ethereum network across two different data sources.")
     st.markdown("Methodology: max(block_arrival_time, all_blob_arrival_time) for each node observing a slot.")
+    st.warning("**Note:** This data doesn't cover the full picture. For example, each of these nodes will see the same block/blob multiple times via gossipsub.")
     
     # Load all data first
     try:
@@ -652,7 +653,7 @@ If you're running locally, please ensure either:
         st.markdown("""
         - **Data**: Direct p2p network monitoring of gossipsub messages. Custom libp2p client + a fork of Prysm.
         - **Coverage**: All instances run by ethPandaOps in datacenters.
-        - **Caveats**: 
+        - **Caveats**: Custom libp2p client can have problems staying peered over long periods of time.
         """)
     
     
@@ -666,15 +667,8 @@ If you're running locally, please ensure either:
     **Gossipsub records:** {metadata['gossipsub_records']:,}
     """)
     
-    # Fixed sample size of 100k blocks
-    sample_size = 100000
-    
-    # Random sampling with Polars
-    if sample_size < len(data['ultrasound']):
-        ultrasound_sample = data['ultrasound'].sample(n=sample_size, seed=42)
-    else:
-        ultrasound_sample = data['ultrasound']
-    
+    # Load all blocks - no sampling
+    ultrasound_sample = data['ultrasound']
     slots = ultrasound_sample['slot'].to_list()
     
     st.sidebar.info(f"Analyzing {len(slots):,} blocks from Ultrasound relay")
