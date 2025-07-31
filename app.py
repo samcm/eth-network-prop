@@ -83,7 +83,18 @@ def load_parquet_data():
                 # Write to cache file
                 with open(cache_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                        if chunk:  # filter out keep-alive chunks
+                            f.write(chunk)
+                
+                # Verify the file is valid before trying to read it
+                try:
+                    # Quick validation by reading just the header
+                    if use_polars:
+                        pl.read_parquet_schema(cache_path)
+                except Exception as validation_error:
+                    # File might be corrupted or incomplete, delete and raise
+                    os.unlink(cache_path)
+                    raise Exception(f"Downloaded file appears to be invalid or corrupted")
                     
                     # Read from cache file
                     if use_polars:
@@ -99,7 +110,7 @@ def load_parquet_data():
                         return df
                     
             except Exception as e:
-                st.error(f"Failed to download {filename} from {url}: {e}")
+                st.error(f"Failed to download {filename}: {e}")
                 # Fall back to local file
         
         # Load from local file
@@ -117,7 +128,7 @@ def load_parquet_data():
             if not url and not os.path.exists(data_dir):
                 st.error("Data not found. Please either:\n1. Set environment variables with data URLs\n2. Run `python preprocess_data.py` to generate local data")
                 st.stop()
-            raise FileNotFoundError(f"Neither URL nor local file found for {filename}")
+            raise FileNotFoundError(f"Data file not found: {filename}")
     
     # Load all data files
     try:
