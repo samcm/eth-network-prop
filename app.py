@@ -16,9 +16,16 @@ import tempfile
 import time
 from dotenv import load_dotenv
 from io import BytesIO
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Enable debug logging
+print("[DEBUG] App starting...", file=sys.stderr)
+print(f"[DEBUG] Python version: {sys.version}", file=sys.stderr)
+print(f"[DEBUG] Streamlit version: {st.__version__}", file=sys.stderr)
+print(f"[DEBUG] Working directory: {os.getcwd()}", file=sys.stderr)
 
 # Page config
 st.set_page_config(
@@ -45,16 +52,23 @@ def load_parquet_data():
     
     def load_parquet_from_url_or_file(filename, env_var, use_polars=True, lazy=False):
         """Load parquet from URL if env var is set, otherwise from local file."""
+        print(f"[DEBUG] Loading {filename}...", file=sys.stderr)
+        
         # Try st.secrets first (for Streamlit Cloud), then fall back to os.getenv (for local)
         url = None
         try:
             if hasattr(st, 'secrets') and env_var in st.secrets:
                 url = st.secrets[env_var]
-        except:
-            pass
+                print(f"[DEBUG] Found {env_var} in st.secrets", file=sys.stderr)
+        except Exception as e:
+            print(f"[DEBUG] Error checking st.secrets: {e}", file=sys.stderr)
         
         if not url:
             url = os.getenv(env_var)
+            if url:
+                print(f"[DEBUG] Found {env_var} in environment", file=sys.stderr)
+            else:
+                print(f"[DEBUG] No URL found for {env_var}", file=sys.stderr)
         
         if url:
             # Use Streamlit's cache directory for persistence
@@ -86,15 +100,19 @@ def load_parquet_data():
             
             # Download from URL directly into memory
             try:
+                print(f"[DEBUG] Downloading {filename} from URL...", file=sys.stderr)
                 # Download entire file into memory
                 response = requests.get(url)
                 response.raise_for_status()
+                print(f"[DEBUG] Downloaded {len(response.content):,} bytes", file=sys.stderr)
                 
                 # Read from bytes in memory
                 data_bytes = BytesIO(response.content)
                 
                 if use_polars:
+                    print(f"[DEBUG] Reading parquet with Polars...", file=sys.stderr)
                     df = pl.read_parquet(data_bytes)
+                    print(f"[DEBUG] Loaded {len(df):,} rows", file=sys.stderr)
                     # Optionally cache to disk for next time
                     try:
                         df.write_parquet(cache_path)
@@ -116,11 +134,14 @@ def load_parquet_data():
                     
             except Exception as e:
                 # If we have a URL but download failed, don't fall back to local
+                print(f"[DEBUG] Download failed: {e}", file=sys.stderr)
                 raise Exception(f"Failed to download {filename}: {str(e)}")
         
         # Load from local file
         local_path = f"{data_dir}/{filename}"
+        print(f"[DEBUG] Checking for local file: {local_path}", file=sys.stderr)
         if os.path.exists(local_path):
+            print(f"[DEBUG] Loading from local file", file=sys.stderr)
             if use_polars:
                 if lazy:
                     return pl.scan_parquet(local_path)
@@ -167,14 +188,23 @@ def load_parquet_data():
             st.stop()
     
     # Load all data files
+    print("[DEBUG] Starting to load all data files...", file=sys.stderr)
     try:
         # Load everything into memory (no lazy loading)
+        print("[DEBUG] Loading ultrasound data...", file=sys.stderr)
         ultrasound_df = load_parquet_from_url_or_file("ultrasound_blocks.parquet", "DATA_ULTRASOUND_URL")
+        print("[DEBUG] Loading beacon data...", file=sys.stderr)
         beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=False)  # Load into memory
+        print("[DEBUG] Loading gossipsub data...", file=sys.stderr)
         gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=False)  # Load into memory
+        print("[DEBUG] Loading entities data...", file=sys.stderr)
         entities_df = load_parquet_from_url_or_file("entities.parquet", "DATA_ENTITIES_URL")
+        print("[DEBUG] Loading proposers data...", file=sys.stderr)
         proposers_df = load_parquet_from_url_or_file("slot_proposers.parquet", "DATA_PROPOSERS_URL")
+        print("[DEBUG] Loading metadata...", file=sys.stderr)
         metadata = load_parquet_from_url_or_file("metadata.parquet", "DATA_METADATA_URL", use_polars=False)
+        
+        print("[DEBUG] All data loaded successfully", file=sys.stderr)
         
         # Keep everything in memory
         return {
@@ -186,6 +216,9 @@ def load_parquet_data():
             'metadata': metadata
         }
     except Exception as e:
+        print(f"[DEBUG] Exception in load_parquet_data: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         # Re-raise with cleaner error message
         if "Failed to download" in str(e):
             # Extract just the filename from the error
@@ -439,15 +472,21 @@ def create_cdf_chart_polars(data_pl, title_prefix):
 
 
 def main():
+    print("[DEBUG] main() started", file=sys.stderr)
     st.title("🌐 Network Data Availability Analysis")
     st.markdown("Analyzing when data becomes available (block + all blobs) across the Ethereum network.")
     st.markdown("Methodology: max(block_arrival_time, all_blob_arrival_time) for each node observing a slot.")
     
     # Load all data first
     try:
+        print("[DEBUG] About to call load_parquet_data()", file=sys.stderr)
         with st.spinner("Downloading data..."):
             data = load_parquet_data()
+        print("[DEBUG] Data loaded successfully", file=sys.stderr)
     except Exception as e:
+        print(f"[DEBUG] Error in main: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         st.error(f"""### Error Loading Data
         
 {str(e)}
