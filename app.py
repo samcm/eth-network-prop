@@ -11,6 +11,8 @@ import numpy as np
 import plotly.graph_objects as go
 import os
 from scipy import stats
+import requests
+import tempfile
 
 # Page config
 st.set_page_config(
@@ -22,22 +24,81 @@ st.set_page_config(
 
 @st.cache_data(ttl=24*60*60)  # Cache for 24 hours
 def load_parquet_data():
-    """Load all data from Parquet files using Polars."""
+    """Load all data from Parquet files using Polars.
+    
+    First checks for URL environment variables, then falls back to local files.
+    Environment variables:
+    - DATA_BEACON_URL: URL to beacon_api_data.parquet
+    - DATA_GOSSIPSUB_URL: URL to gossipsub_data.parquet  
+    - DATA_ULTRASOUND_URL: URL to ultrasound_blocks.parquet
+    - DATA_ENTITIES_URL: URL to entities.parquet
+    - DATA_PROPOSERS_URL: URL to slot_proposers.parquet
+    - DATA_METADATA_URL: URL to metadata.parquet
+    """
     data_dir = "data"
     
-    # Check if data directory exists
-    if not os.path.exists(data_dir):
-        st.error("Data directory not found. Please run `python preprocess_data.py` first.")
-        st.stop()
+    def load_parquet_from_url_or_file(filename, env_var, use_polars=True, lazy=False):
+        """Load parquet from URL if env var is set, otherwise from local file."""
+        url = os.getenv(env_var)
+        
+        if url:
+            # Download from URL
+            try:
+                with st.spinner(f"Downloading {filename}..."):
+                    # Create a temporary file
+                    with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
+                        response = requests.get(url, stream=True)
+                        response.raise_for_status()
+                        
+                        # Write to temp file
+                        for chunk in response.iter_content(chunk_size=8192):
+                            tmp.write(chunk)
+                        
+                        tmp_path = tmp.name
+                    
+                    # Read from temp file
+                    if use_polars:
+                        if lazy:
+                            df = pl.scan_parquet(tmp_path)
+                        else:
+                            df = pl.read_parquet(tmp_path)
+                    else:
+                        df = pd.read_parquet(tmp_path)
+                    
+                    # Clean up temp file
+                    os.unlink(tmp_path)
+                    
+                    return df
+                    
+            except Exception as e:
+                st.error(f"Failed to download {filename} from {url}: {e}")
+                # Fall back to local file
+        
+        # Load from local file
+        local_path = f"{data_dir}/{filename}"
+        if os.path.exists(local_path):
+            if use_polars:
+                if lazy:
+                    return pl.scan_parquet(local_path)
+                else:
+                    return pl.read_parquet(local_path)
+            else:
+                return pd.read_parquet(local_path)
+        else:
+            # If neither URL nor local file exists, check if we can use sample data
+            if not url and not os.path.exists(data_dir):
+                st.error("Data not found. Please either:\n1. Set environment variables with data URLs\n2. Run `python preprocess_data.py` to generate local data")
+                st.stop()
+            raise FileNotFoundError(f"Neither URL nor local file found for {filename}")
     
-    # Load all parquet files with Polars (lazy loading)
+    # Load all data files
     try:
-        ultrasound_df = pl.read_parquet(f"{data_dir}/ultrasound_blocks.parquet")
-        beacon_data = pl.scan_parquet(f"{data_dir}/beacon_api_data.parquet")
-        gossipsub_data = pl.scan_parquet(f"{data_dir}/gossipsub_data.parquet")
-        entities_df = pl.read_parquet(f"{data_dir}/entities.parquet")
-        proposers_df = pl.read_parquet(f"{data_dir}/slot_proposers.parquet")
-        metadata = pd.read_parquet(f"{data_dir}/metadata.parquet")  # Keep metadata as pandas
+        ultrasound_df = load_parquet_from_url_or_file("ultrasound_blocks.parquet", "DATA_ULTRASOUND_URL")
+        beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=True)
+        gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=True)
+        entities_df = load_parquet_from_url_or_file("entities.parquet", "DATA_ENTITIES_URL")
+        proposers_df = load_parquet_from_url_or_file("slot_proposers.parquet", "DATA_PROPOSERS_URL")
+        metadata = load_parquet_from_url_or_file("metadata.parquet", "DATA_METADATA_URL", use_polars=False)
         
         return {
             'ultrasound': ultrasound_df,
