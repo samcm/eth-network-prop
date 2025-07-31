@@ -27,7 +27,7 @@ st.set_page_config(
 )
 
 
-@st.cache_data(ttl=24*60*60)  # Cache for 24 hours
+@st.cache_data(ttl=24*60*60, show_spinner="Downloading data...")  # Cache for 24 hours
 def load_parquet_data():
     """Load all data from Parquet files using Polars.
     
@@ -47,8 +47,14 @@ def load_parquet_data():
         url = os.getenv(env_var)
         
         if url:
-            # Create a cache directory
-            cache_dir = os.path.join(tempfile.gettempdir(), 'streamlit_data_cache')
+            # Use Streamlit's cache directory for persistence
+            try:
+                # Try to get Streamlit's cache dir
+                cache_dir = st.runtime.legacy_caching.file_util.get_streamlit_file_path('cache', 'data')
+            except:
+                # Fallback to a local cache directory
+                cache_dir = os.path.join(os.getcwd(), '.streamlit_cache')
+            
             os.makedirs(cache_dir, exist_ok=True)
             cache_path = os.path.join(cache_dir, filename)
             
@@ -59,34 +65,38 @@ def load_parquet_data():
                 if file_age < 24 * 60 * 60:  # 24 hours in seconds
                     # Use cached file
                     if use_polars:
+                        # Always read into memory first
+                        df = pl.read_parquet(cache_path)
                         if lazy:
-                            return pl.scan_parquet(cache_path)
+                            return df.lazy()
                         else:
-                            return pl.read_parquet(cache_path)
+                            return df
                     else:
                         return pd.read_parquet(cache_path)
             
             # Download from URL
             try:
-                with st.spinner(f"Downloading {filename}..."):
-                    response = requests.get(url, stream=True)
-                    response.raise_for_status()
-                    
-                    # Write to cache file
-                    with open(cache_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
+                # Simple download without progress bars
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                
+                # Write to cache file
+                with open(cache_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
                     
                     # Read from cache file
                     if use_polars:
+                        # Always read into memory first when loading from URL
+                        df = pl.read_parquet(cache_path)
                         if lazy:
-                            df = pl.scan_parquet(cache_path)
+                            # Convert to lazy after loading
+                            return df.lazy()
                         else:
-                            df = pl.read_parquet(cache_path)
+                            return df
                     else:
                         df = pd.read_parquet(cache_path)
-                    
-                    return df
+                        return df
                     
             except Exception as e:
                 st.error(f"Failed to download {filename} from {url}: {e}")
