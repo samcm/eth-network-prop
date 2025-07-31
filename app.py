@@ -17,6 +17,12 @@ import time
 from dotenv import load_dotenv
 from io import BytesIO
 import sys
+import gc
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,6 +32,16 @@ print("[DEBUG] App starting...", file=sys.stderr)
 print(f"[DEBUG] Python version: {sys.version}", file=sys.stderr)
 print(f"[DEBUG] Streamlit version: {st.__version__}", file=sys.stderr)
 print(f"[DEBUG] Working directory: {os.getcwd()}", file=sys.stderr)
+
+# Memory usage helper
+def log_memory_usage(label):
+    if HAS_PSUTIL:
+        try:
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            print(f"[DEBUG] Memory usage ({label}): {mem_info.rss / 1024 / 1024:.1f} MB", file=sys.stderr)
+        except:
+            pass
 
 # Page config
 st.set_page_config(
@@ -71,12 +87,12 @@ def load_parquet_data():
                 print(f"[DEBUG] No URL found for {env_var}", file=sys.stderr)
         
         if url:
-            # Use Streamlit's cache directory for persistence
-            try:
-                # Try to get Streamlit's cache dir
-                cache_dir = st.runtime.legacy_caching.file_util.get_streamlit_file_path('cache', 'data')
-            except:
-                # Fallback to a local cache directory
+            # Use /tmp for Streamlit Cloud compatibility
+            if os.path.exists('/tmp') and os.access('/tmp', os.W_OK):
+                # On Streamlit Cloud, use /tmp which is writable
+                cache_dir = '/tmp/streamlit_data_cache'
+            else:
+                # For local development, use current directory
                 cache_dir = os.path.join(os.getcwd(), '.streamlit_cache')
             
             os.makedirs(cache_dir, exist_ok=True)
@@ -106,31 +122,49 @@ def load_parquet_data():
                 response.raise_for_status()
                 print(f"[DEBUG] Downloaded {len(response.content):,} bytes", file=sys.stderr)
                 
-                # Read from bytes in memory
-                data_bytes = BytesIO(response.content)
-                
-                if use_polars:
-                    print(f"[DEBUG] Reading parquet with Polars...", file=sys.stderr)
-                    df = pl.read_parquet(data_bytes)
-                    print(f"[DEBUG] Loaded {len(df):,} rows", file=sys.stderr)
-                    # Optionally cache to disk for next time
-                    try:
-                        df.write_parquet(cache_path)
-                    except:
-                        pass  # Ignore cache write errors
+                # For large files, save to disk first then use scan_parquet
+                if len(response.content) > 50_000_000:  # 50MB threshold
+                    print(f"[DEBUG] Large file, saving to disk first", file=sys.stderr)
+                    # Write directly to cache file
+                    with open(cache_path, 'wb') as f:
+                        f.write(response.content)
                     
-                    if lazy:
-                        return df.lazy()
+                    # Now use scan_parquet for lazy loading
+                    if use_polars:
+                        if lazy:
+                            print(f"[DEBUG] Using scan_parquet for lazy loading", file=sys.stderr)
+                            return pl.scan_parquet(cache_path)
+                        else:
+                            df = pl.read_parquet(cache_path)
+                            print(f"[DEBUG] Loaded {len(df):,} rows", file=sys.stderr)
+                            return df
                     else:
-                        return df
+                        return pd.read_parquet(cache_path)
                 else:
-                    df = pd.read_parquet(data_bytes)
-                    # Optionally cache to disk
-                    try:
-                        df.to_parquet(cache_path)
-                    except:
-                        pass
-                    return df
+                    # Small files can be read from memory
+                    data_bytes = BytesIO(response.content)
+                    
+                    if use_polars:
+                        print(f"[DEBUG] Reading parquet with Polars...", file=sys.stderr)
+                        df = pl.read_parquet(data_bytes)
+                        print(f"[DEBUG] Loaded {len(df):,} rows", file=sys.stderr)
+                        # Cache for next time
+                        try:
+                            df.write_parquet(cache_path)
+                        except:
+                            pass
+                        
+                        if lazy:
+                            return df.lazy()
+                        else:
+                            return df
+                    else:
+                        df = pd.read_parquet(data_bytes)
+                        try:
+                            df.to_parquet(cache_path)
+                        except:
+                            pass
+                        return df
                     
             except Exception as e:
                 # If we have a URL but download failed, don't fall back to local
@@ -189,28 +223,49 @@ def load_parquet_data():
     
     # Load all data files
     print("[DEBUG] Starting to load all data files...", file=sys.stderr)
+    log_memory_usage("Before loading data")
     try:
-        # Load everything into memory (no lazy loading)
+        # Load data - use lazy loading for large datasets
         print("[DEBUG] Loading ultrasound data...", file=sys.stderr)
         ultrasound_df = load_parquet_from_url_or_file("ultrasound_blocks.parquet", "DATA_ULTRASOUND_URL")
-        print("[DEBUG] Loading beacon data...", file=sys.stderr)
-        beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=False)  # Load into memory
-        print("[DEBUG] Loading gossipsub data...", file=sys.stderr)
-        gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=False)  # Load into memory
+        # Only keep the columns we need to reduce memory
+        ultrasound_df = ultrasound_df.select(['slot', 'time_into_slot_before_publish_ms'])
+        print(f"[DEBUG] Ultrasound data: {len(ultrasound_df):,} rows", file=sys.stderr)
+        
+        print("[DEBUG] Loading beacon data (lazy)...", file=sys.stderr)
+        beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=True)  # Lazy load
+        
+        print("[DEBUG] Loading gossipsub data (lazy)...", file=sys.stderr)
+        gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=True)  # Lazy load
+        
         print("[DEBUG] Loading entities data...", file=sys.stderr)
         entities_df = load_parquet_from_url_or_file("entities.parquet", "DATA_ENTITIES_URL")
+        # Only keep necessary columns
+        entities_df = entities_df.select(['proposer_index', 'entity'])
+        print(f"[DEBUG] Entities data: {len(entities_df):,} rows", file=sys.stderr)
+        
         print("[DEBUG] Loading proposers data...", file=sys.stderr)
         proposers_df = load_parquet_from_url_or_file("slot_proposers.parquet", "DATA_PROPOSERS_URL")
+        # Only keep necessary columns
+        proposers_df = proposers_df.select(['slot', 'proposer_index'])
+        print(f"[DEBUG] Proposers data: {len(proposers_df):,} rows", file=sys.stderr)
+        
         print("[DEBUG] Loading metadata...", file=sys.stderr)
         metadata = load_parquet_from_url_or_file("metadata.parquet", "DATA_METADATA_URL", use_polars=False)
         
         print("[DEBUG] All data loaded successfully", file=sys.stderr)
+        log_memory_usage("After loading all data")
         
-        # Keep everything in memory
+        # Force garbage collection to free up memory
+        gc.collect()
+        log_memory_usage("After garbage collection")
+        
+        # Return data - beacon and gossipsub should already be lazy frames
+        print(f"[DEBUG] Returning data dictionary", file=sys.stderr)
         return {
             'ultrasound': ultrasound_df,
-            'beacon': beacon_data.lazy() if hasattr(beacon_data, 'lazy') else beacon_data,  # Already loaded into memory
-            'gossipsub': gossipsub_data.lazy() if hasattr(gossipsub_data, 'lazy') else gossipsub_data,  # Already loaded into memory
+            'beacon': beacon_data,  # Already lazy
+            'gossipsub': gossipsub_data,  # Already lazy
             'entities': entities_df,
             'proposers': proposers_df,
             'metadata': metadata
@@ -248,7 +303,17 @@ def get_entities_for_slots_polars(slots, entities_df, proposers_df):
 
 @st.cache_data(ttl=24*60*60)  # Cache for 24 hours
 def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_df, _entities_df, _proposers_df):
-    """Process data efficiently using Polars lazy evaluation."""
+    """Process data efficiently using Polars lazy evaluation with chunking."""
+    print(f"[DEBUG] process_data_for_analysis called with {len(slots):,} slots", file=sys.stderr)
+    log_memory_usage("Start of process_data_for_analysis")
+    
+    # Reduce sample size if too large for memory constraints
+    if len(slots) > 50000:  # Reduce from 100k to 50k for memory constraints
+        print(f"[DEBUG] Reducing slot sample from {len(slots):,} to 50,000 for memory constraints", file=sys.stderr)
+        import random
+        random.seed(42)
+        slots = random.sample(slots, 50000)
+    
     # Get entities for slots
     slot_entities = get_entities_for_slots_polars(slots, _entities_df, _proposers_df)
     
@@ -257,33 +322,71 @@ def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_
     slot_entities_lazy = slot_entities.lazy()
     
     # Process beacon data - filter for clients starting with 'pub'
-    beacon_processed = (
-        _beacon_lazy
-        .filter(pl.col('slot').is_in(slots))
-        .filter(pl.col('meta_client_name').str.starts_with('pub'))  # Only keep clients starting with 'pub'
-        .join(ultrasound_subset, on='slot', how='left')
-        .join(slot_entities_lazy, on='slot', how='left')
-        .with_columns(
-            (pl.col('propagation_time_ms') - pl.col('time_into_slot_before_publish_ms')).alias('adjusted_propagation_ms')
+    print(f"[DEBUG] Processing beacon data...", file=sys.stderr)
+    # Process in chunks to avoid memory issues
+    chunk_size = 10000
+    beacon_chunks = []
+    
+    for i in range(0, len(slots), chunk_size):
+        chunk_slots = slots[i:i+chunk_size]
+        print(f"[DEBUG] Processing beacon chunk {i//chunk_size + 1}/{(len(slots)-1)//chunk_size + 1}...", file=sys.stderr)
+        
+        chunk_data = (
+            _beacon_lazy
+            .filter(pl.col('slot').is_in(chunk_slots))
+            .filter(pl.col('meta_client_name').str.starts_with('pub'))  # Only keep clients starting with 'pub'
+            .join(ultrasound_subset, on='slot', how='left')
+            .join(slot_entities_lazy, on='slot', how='left')
+            .with_columns(
+                (pl.col('propagation_time_ms') - pl.col('time_into_slot_before_publish_ms')).alias('adjusted_propagation_ms')
+            )
+            .filter(pl.col('adjusted_propagation_ms') >= 0)
+            .with_columns(pl.col('adjusted_propagation_ms').alias('propagation_time_ms'))
+            .select(['slot', 'meta_client_name', 'propagation_time_ms', 'size_mb', 'blob_count', 'entity'])  # Only keep needed columns
+            .collect(streaming=True)  # Use streaming for better memory efficiency
         )
-        .filter(pl.col('adjusted_propagation_ms') >= 0)
-        .with_columns(pl.col('adjusted_propagation_ms').alias('propagation_time_ms'))
-        .collect()  # Execute the lazy query
-    )
+        beacon_chunks.append(chunk_data)
+        gc.collect()  # Force garbage collection after each chunk
+    
+    # Combine chunks
+    beacon_processed = pl.concat(beacon_chunks) if beacon_chunks else pl.DataFrame()
+    del beacon_chunks  # Free memory
+    gc.collect()
+    
+    print(f"[DEBUG] Beacon data processed: {len(beacon_processed):,} rows", file=sys.stderr)
+    log_memory_usage("After processing beacon data")
     
     # Process gossipsub data similarly
-    gossipsub_processed = (
-        _gossipsub_lazy
-        .filter(pl.col('slot').is_in(slots))
-        .join(ultrasound_subset, on='slot', how='left')
-        .join(slot_entities_lazy, on='slot', how='left')
-        .with_columns(
-            (pl.col('propagation_time_ms') - pl.col('time_into_slot_before_publish_ms')).alias('adjusted_propagation_ms')
+    print(f"[DEBUG] Processing gossipsub data...", file=sys.stderr)
+    gossipsub_chunks = []
+    
+    for i in range(0, len(slots), chunk_size):
+        chunk_slots = slots[i:i+chunk_size]
+        print(f"[DEBUG] Processing gossipsub chunk {i//chunk_size + 1}/{(len(slots)-1)//chunk_size + 1}...", file=sys.stderr)
+        
+        chunk_data = (
+            _gossipsub_lazy
+            .filter(pl.col('slot').is_in(chunk_slots))
+            .join(ultrasound_subset, on='slot', how='left')
+            .join(slot_entities_lazy, on='slot', how='left')
+            .with_columns(
+                (pl.col('propagation_time_ms') - pl.col('time_into_slot_before_publish_ms')).alias('adjusted_propagation_ms')
+            )
+            .filter(pl.col('adjusted_propagation_ms') >= 0)
+            .with_columns(pl.col('adjusted_propagation_ms').alias('propagation_time_ms'))
+            .select(['slot', 'meta_client_name', 'propagation_time_ms', 'size_mb', 'blob_count', 'entity'])  # Only keep needed columns
+            .collect(streaming=True)  # Use streaming for better memory efficiency
         )
-        .filter(pl.col('adjusted_propagation_ms') >= 0)
-        .with_columns(pl.col('adjusted_propagation_ms').alias('propagation_time_ms'))
-        .collect()  # Execute the lazy query
-    )
+        gossipsub_chunks.append(chunk_data)
+        gc.collect()  # Force garbage collection after each chunk
+    
+    # Combine chunks
+    gossipsub_processed = pl.concat(gossipsub_chunks) if gossipsub_chunks else pl.DataFrame()
+    del gossipsub_chunks  # Free memory
+    gc.collect()
+    
+    print(f"[DEBUG] Gossipsub data processed: {len(gossipsub_processed):,} rows", file=sys.stderr)
+    log_memory_usage("After processing gossipsub data")
     
     return beacon_processed, gossipsub_processed
 
@@ -314,6 +417,11 @@ def create_cdf_chart_polars(data_pl, title_prefix):
     
     if data_pl.height == 0:
         return fig
+    
+    # Sample data if too large to avoid memory issues
+    if data_pl.height > 1_000_000:  # If more than 1M rows
+        print(f"[DEBUG] Sampling CDF data from {data_pl.height:,} to 1M rows", file=sys.stderr)
+        data_pl = data_pl.sample(n=1_000_000, seed=42)
     
     # Calculate total unique contributors/nodes and slots
     # Check if this is beacon data (has contributor format) or libp2p data
@@ -473,6 +581,7 @@ def create_cdf_chart_polars(data_pl, title_prefix):
 
 def main():
     print("[DEBUG] main() started", file=sys.stderr)
+    log_memory_usage("Start of main()")
     st.title("🌐 Network Data Availability Analysis")
     st.markdown("Analyzing when data becomes available (block + all blobs) across the Ethereum network.")
     st.markdown("Methodology: max(block_arrival_time, all_blob_arrival_time) for each node observing a slot.")
@@ -483,6 +592,7 @@ def main():
         with st.spinner("Downloading data..."):
             data = load_parquet_data()
         print("[DEBUG] Data loaded successfully", file=sys.stderr)
+        log_memory_usage("After load_parquet_data()")
     except Exception as e:
         print(f"[DEBUG] Error in main: {e}", file=sys.stderr)
         import traceback
@@ -527,8 +637,8 @@ If you're running locally, please ensure either:
     **Gossipsub records:** {metadata['gossipsub_records']:,}
     """)
     
-    # Fixed sample size of 100k blocks
-    sample_size = 100000
+    # Reduced sample size for memory constraints on Streamlit Cloud
+    sample_size = 50000  # Reduced from 100k to 50k
     
     # Random sampling with Polars
     if sample_size < len(data['ultrasound']):
@@ -538,7 +648,7 @@ If you're running locally, please ensure either:
     
     slots = ultrasound_sample['slot'].to_list()
     
-    st.sidebar.info(f"Analyzing {len(slots):,} blocks from Ultrasound relay")
+    st.sidebar.info(f"Analyzing {len(slots):,} blocks from Ultrasound relay\n\n_Note: Sample size reduced from 100k to 50k for cloud deployment memory constraints_")
     
     # Option to focus on solo stakers
     focus_solo = st.sidebar.checkbox(
@@ -561,6 +671,8 @@ If you're running locally, please ensure either:
                 st.sidebar.warning("No solo staker blocks found in sample. Try a larger sample size.")
     
     # Process data efficiently with Polars
+    log_memory_usage("Before processing data")
+    print(f"[DEBUG] Processing {len(slots):,} slots", file=sys.stderr)
     with st.spinner("Processing data with Polars..."):
         beacon_data, gossipsub_data = process_data_for_analysis(
             data['beacon'], 
