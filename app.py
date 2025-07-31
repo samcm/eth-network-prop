@@ -44,7 +44,11 @@ def load_parquet_data():
     
     def load_parquet_from_url_or_file(filename, env_var, use_polars=True, lazy=False):
         """Load parquet from URL if env var is set, otherwise from local file."""
-        url = os.getenv(env_var)
+        # Try st.secrets first (for Streamlit Cloud), then fall back to os.getenv (for local)
+        try:
+            url = st.secrets.get(env_var)
+        except:
+            url = os.getenv(env_var)
         
         if url:
             # Use Streamlit's cache directory for persistence
@@ -131,7 +135,14 @@ def load_parquet_data():
             raise FileNotFoundError(f"Data file not found: {filename}")
     
     # Check if we're using URLs or local files
-    using_urls = any(os.getenv(var) for var in [
+    # Try st.secrets first, then os.getenv
+    def has_secret(var):
+        try:
+            return st.secrets.get(var) is not None
+        except:
+            return os.getenv(var) is not None
+    
+    using_urls = any(has_secret(var) for var in [
         "DATA_ULTRASOUND_URL", "DATA_BEACON_URL", "DATA_GOSSIPSUB_URL",
         "DATA_ENTITIES_URL", "DATA_PROPOSERS_URL", "DATA_METADATA_URL"
     ])
@@ -147,7 +158,7 @@ def load_parquet_data():
             ("metadata.parquet", "DATA_METADATA_URL")
         ]
         
-        missing = [name for name, var in required_vars if not os.getenv(var)]
+        missing = [name for name, var in required_vars if not has_secret(var)]
         if missing:
             st.error(f"Missing environment variables for: {', '.join(missing)}")
             st.stop()
