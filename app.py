@@ -27,7 +27,7 @@ st.set_page_config(
 )
 
 
-@st.cache_data(ttl=24*60*60, show_spinner="Downloading data...")  # Cache for 24 hours
+@st.cache_data(ttl=24*60*60)  # Cache for 24 hours
 def load_parquet_data():
     """Load all data from Parquet files using Polars.
     
@@ -110,8 +110,8 @@ def load_parquet_data():
                         return df
                     
             except Exception as e:
-                st.error(f"Failed to download {filename}: {e}")
-                # Fall back to local file
+                # If we have a URL but download failed, don't fall back to local
+                raise Exception(f"Failed to download {filename}: {str(e)}")
         
         # Load from local file
         local_path = f"{data_dir}/{filename}"
@@ -129,6 +129,28 @@ def load_parquet_data():
                 st.error("Data not found. Please either:\n1. Set environment variables with data URLs\n2. Run `python preprocess_data.py` to generate local data")
                 st.stop()
             raise FileNotFoundError(f"Data file not found: {filename}")
+    
+    # Check if we're using URLs or local files
+    using_urls = any(os.getenv(var) for var in [
+        "DATA_ULTRASOUND_URL", "DATA_BEACON_URL", "DATA_GOSSIPSUB_URL",
+        "DATA_ENTITIES_URL", "DATA_PROPOSERS_URL", "DATA_METADATA_URL"
+    ])
+    
+    if using_urls:
+        # When using URLs, all must be set
+        required_vars = [
+            ("ultrasound_blocks.parquet", "DATA_ULTRASOUND_URL"),
+            ("beacon_api_data.parquet", "DATA_BEACON_URL"),
+            ("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL"),
+            ("entities.parquet", "DATA_ENTITIES_URL"),
+            ("slot_proposers.parquet", "DATA_PROPOSERS_URL"),
+            ("metadata.parquet", "DATA_METADATA_URL")
+        ]
+        
+        missing = [name for name, var in required_vars if not os.getenv(var)]
+        if missing:
+            st.error(f"Missing environment variables for: {', '.join(missing)}")
+            st.stop()
     
     # Load all data files
     try:
@@ -148,9 +170,15 @@ def load_parquet_data():
             'metadata': metadata
         }
     except Exception as e:
-        st.error(f"Error loading data files: {e}")
-        st.info("Please run `python preprocess_data.py` to generate the data files.")
-        st.stop()
+        # Re-raise with cleaner error message
+        if "Failed to download" in str(e):
+            # Extract just the filename from the error
+            import re
+            match = re.search(r'Failed to download ([^:]+):', str(e))
+            if match:
+                filename = match.group(1)
+                raise Exception(f"Unable to download {filename}. Please check your internet connection and try again.")
+        raise Exception(f"Error loading data: {str(e)}")
 
 
 def get_entities_for_slots_polars(slots, entities_df, proposers_df):
@@ -392,7 +420,23 @@ def main():
     st.title("🌐 Network Data Availability Analysis")
     st.markdown("Analyzing when data becomes available (block + all blobs) across the Ethereum network.")
     st.markdown("Methodology: max(block_arrival_time, all_blob_arrival_time) for each node observing a slot.")
-
+    
+    # Load all data first
+    try:
+        with st.spinner("Downloading data..."):
+            data = load_parquet_data()
+    except Exception as e:
+        st.error(f"""### Error Loading Data
+        
+{str(e)}
+        
+If you're running locally, please ensure either:
+1. Environment variables are set with valid data URLs
+2. Run `python preprocess_data.py` to generate local data files
+        """)
+        st.stop()
+    
+    # Now show the content
     col1, col2 = st.columns(2)
     
     with col1:
@@ -411,9 +455,6 @@ def main():
         - **Caveats**: 
         """)
     
-    # Load all data
-    with st.spinner("Loading pre-processed data"):
-        data = load_parquet_data()
     
     # Display metadata
     metadata = data['metadata'].iloc[0]
