@@ -15,6 +15,7 @@ import requests
 import tempfile
 import time
 from dotenv import load_dotenv
+from io import BytesIO
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,9 +46,14 @@ def load_parquet_data():
     def load_parquet_from_url_or_file(filename, env_var, use_polars=True, lazy=False):
         """Load parquet from URL if env var is set, otherwise from local file."""
         # Try st.secrets first (for Streamlit Cloud), then fall back to os.getenv (for local)
+        url = None
         try:
-            url = st.secrets.get(env_var)
+            if hasattr(st, 'secrets') and env_var in st.secrets:
+                url = st.secrets[env_var]
         except:
+            pass
+        
+        if not url:
             url = os.getenv(env_var)
         
         if url:
@@ -78,40 +84,35 @@ def load_parquet_data():
                     else:
                         return pd.read_parquet(cache_path)
             
-            # Download from URL
+            # Download from URL directly into memory
             try:
-                # Simple download without progress bars
-                response = requests.get(url, stream=True)
+                # Download entire file into memory
+                response = requests.get(url)
                 response.raise_for_status()
                 
-                # Write to cache file
-                with open(cache_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:  # filter out keep-alive chunks
-                            f.write(chunk)
+                # Read from bytes in memory
+                data_bytes = BytesIO(response.content)
                 
-                # Verify the file is valid before trying to read it
-                try:
-                    # Quick validation by reading just the header
-                    if use_polars:
-                        pl.read_parquet_schema(cache_path)
-                except Exception as validation_error:
-                    # File might be corrupted or incomplete, delete and raise
-                    os.unlink(cache_path)
-                    raise Exception(f"Downloaded file appears to be invalid or corrupted")
+                if use_polars:
+                    df = pl.read_parquet(data_bytes)
+                    # Optionally cache to disk for next time
+                    try:
+                        df.write_parquet(cache_path)
+                    except:
+                        pass  # Ignore cache write errors
                     
-                    # Read from cache file
-                    if use_polars:
-                        # Always read into memory first when loading from URL
-                        df = pl.read_parquet(cache_path)
-                        if lazy:
-                            # Convert to lazy after loading
-                            return df.lazy()
-                        else:
-                            return df
+                    if lazy:
+                        return df.lazy()
                     else:
-                        df = pd.read_parquet(cache_path)
                         return df
+                else:
+                    df = pd.read_parquet(data_bytes)
+                    # Optionally cache to disk
+                    try:
+                        df.to_parquet(cache_path)
+                    except:
+                        pass
+                    return df
                     
             except Exception as e:
                 # If we have a URL but download failed, don't fall back to local
@@ -138,9 +139,11 @@ def load_parquet_data():
     # Try st.secrets first, then os.getenv
     def has_secret(var):
         try:
-            return st.secrets.get(var) is not None
+            if hasattr(st, 'secrets') and var in st.secrets:
+                return True
         except:
-            return os.getenv(var) is not None
+            pass
+        return os.getenv(var) is not None
     
     using_urls = any(has_secret(var) for var in [
         "DATA_ULTRASOUND_URL", "DATA_BEACON_URL", "DATA_GOSSIPSUB_URL",
@@ -165,17 +168,19 @@ def load_parquet_data():
     
     # Load all data files
     try:
+        # Load everything into memory (no lazy loading)
         ultrasound_df = load_parquet_from_url_or_file("ultrasound_blocks.parquet", "DATA_ULTRASOUND_URL")
-        beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=True)
-        gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=True)
+        beacon_data = load_parquet_from_url_or_file("beacon_api_data.parquet", "DATA_BEACON_URL", lazy=False)  # Load into memory
+        gossipsub_data = load_parquet_from_url_or_file("gossipsub_data.parquet", "DATA_GOSSIPSUB_URL", lazy=False)  # Load into memory
         entities_df = load_parquet_from_url_or_file("entities.parquet", "DATA_ENTITIES_URL")
         proposers_df = load_parquet_from_url_or_file("slot_proposers.parquet", "DATA_PROPOSERS_URL")
         metadata = load_parquet_from_url_or_file("metadata.parquet", "DATA_METADATA_URL", use_polars=False)
         
+        # Keep everything in memory
         return {
             'ultrasound': ultrasound_df,
-            'beacon': beacon_data,  # LazyFrame
-            'gossipsub': gossipsub_data,  # LazyFrame
+            'beacon': beacon_data.lazy() if hasattr(beacon_data, 'lazy') else beacon_data,  # Already loaded into memory
+            'gossipsub': gossipsub_data.lazy() if hasattr(gossipsub_data, 'lazy') else gossipsub_data,  # Already loaded into memory
             'entities': entities_df,
             'proposers': proposers_df,
             'metadata': metadata
