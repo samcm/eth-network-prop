@@ -282,15 +282,21 @@ def create_cdf_chart_polars(data_pl, title_prefix):
     if data_pl.height == 0:
         return fig
     
-    # Calculate total unique contributors and slots
-    if 'meta_client_name' in data_pl.columns:
+    # Calculate total unique contributors/nodes and slots
+    # Check if this is beacon data (has contributor format) or libp2p data
+    is_beacon_data = "Beacon" in title_prefix
+    
+    if 'meta_client_name' in data_pl.columns and is_beacon_data:
         # Extract contributor name from format: privacy/username/node-uuid
         contributors = data_pl.with_columns(
             pl.col('meta_client_name').str.split('/').list.get(1).alias('contributor')
         )
         total_contributors = contributors['contributor'].n_unique()
+        count_label = "contributors"
     else:
-        total_contributors = 0
+        # For libp2p, just count nodes
+        total_contributors = data_pl['meta_client_name'].n_unique() if 'meta_client_name' in data_pl.columns else 0
+        count_label = "nodes"
     total_slots = data_pl['slot'].n_unique()
     
     # Create 100KB bins
@@ -386,7 +392,7 @@ def create_cdf_chart_polars(data_pl, title_prefix):
     
     
     fig.update_layout(
-        title=f"{title_prefix} - CDF of Data Availability Times by 100KB Bins<br><sub>{total_contributors} contributors, {total_slots:,} slots</sub>",
+        title=f"{title_prefix} - CDF of Data Availability Times by 100KB Bins<br><sub>{total_contributors} {count_label}, {total_slots:,} slots</sub>",
         xaxis_title="Data Availability Time from Ultrasound Broadcast (seconds)",
         yaxis_title="Percentile (%)",
         height=600,
@@ -564,12 +570,8 @@ If you're running locally, please ensure either:
             beacon_contributors = 0
         beacon_slots = beacon_data['slot'].n_unique() if beacon_data.height > 0 else 0
         
-        if gossipsub_data.height > 0 and 'meta_client_name' in gossipsub_data.columns:
-            gossip_contributors = gossipsub_data.with_columns(
-                pl.col('meta_client_name').str.split('/').list.get(1).alias('contributor')
-            )['contributor'].n_unique()
-        else:
-            gossip_contributors = 0
+        # For gossipsub, just count nodes (not contributors)
+        gossip_nodes = gossipsub_data['meta_client_name'].n_unique() if gossipsub_data.height > 0 else 0
         gossip_slots = gossipsub_data['slot'].n_unique() if gossipsub_data.height > 0 else 0
         
         # Process both datasets for combined view
@@ -735,7 +737,7 @@ If you're running locally, please ensure either:
                 ))
         
         fig_combined.update_layout(
-            title=f"Combined CDF - Data Availability Times by 100KB Bins<br><sub>Beacon: {beacon_contributors} contributors, {beacon_slots:,} slots | Libp2p: {gossip_contributors} nodes, {gossip_slots:,} slots</sub>",
+            title=f"Combined CDF - Data Availability Times by 100KB Bins<br><sub>Beacon: {beacon_contributors} contributors, {beacon_slots:,} slots | Libp2p: {gossip_nodes} nodes, {gossip_slots:,} slots</sub>",
             xaxis_title="Data Availability Time from Ultrasound Broadcast (seconds)",
             yaxis_title="Percentile (%)",
             height=600,
@@ -942,21 +944,8 @@ If you're running locally, please ensure either:
         
         # Gossipsub box plots
         if gossipsub_data.height > 0:
-            # Calculate node and slot counts for gossipsub data
-            if 'meta_client_name' in gossipsub_data.columns:
-                # Check if gossipsub uses same format, if so extract contributors
-                sample_name = gossipsub_data.select('meta_client_name').limit(1)['meta_client_name'][0]
-                if sample_name and '/' in sample_name:
-                    gossip_box_contributors = gossipsub_data.with_columns(
-                        pl.col('meta_client_name').str.split('/').list.get(1).alias('contributor')
-                    )['contributor'].n_unique()
-                    gossip_label = "contributors"
-                else:
-                    gossip_box_contributors = gossipsub_data['meta_client_name'].n_unique()
-                    gossip_label = "nodes"
-            else:
-                gossip_box_contributors = 0
-                gossip_label = "nodes"
+            # For gossipsub data, just count unique nodes (not contributors)
+            gossip_box_nodes = gossipsub_data['meta_client_name'].n_unique()
             gossip_box_slots = gossipsub_data['slot'].n_unique()
             
             # Create box plot data
@@ -1053,7 +1042,7 @@ If you're running locally, please ensure either:
                 })
             
             fig_gossip_box.update_layout(
-                title=f"Libp2p Direct Monitoring - {'Solo Stakers' if is_solo_focused else 'All Proposers'} - Data Availability Time Distribution by 100KB Bins<br><sub>{gossip_box_contributors} {gossip_label}, {gossip_box_slots:,} slots</sub>",
+                title=f"Libp2p Direct Monitoring - {'Solo Stakers' if is_solo_focused else 'All Proposers'} - Data Availability Time Distribution by 100KB Bins<br><sub>{gossip_box_nodes} nodes, {gossip_box_slots:,} slots</sub>",
                 xaxis_title="Combined Size (Block + Blobs)",
                 yaxis_title="Data Availability Time (seconds)",
                 height=500,
