@@ -13,6 +13,11 @@ import os
 from scipy import stats
 import requests
 import tempfile
+import time
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Page config
 st.set_page_config(
@@ -42,31 +47,44 @@ def load_parquet_data():
         url = os.getenv(env_var)
         
         if url:
+            # Create a cache directory
+            cache_dir = os.path.join(tempfile.gettempdir(), 'streamlit_data_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, filename)
+            
+            # Check if file already exists in cache
+            if os.path.exists(cache_path):
+                # Check if file is less than 24 hours old
+                file_age = time.time() - os.path.getmtime(cache_path)
+                if file_age < 24 * 60 * 60:  # 24 hours in seconds
+                    # Use cached file
+                    if use_polars:
+                        if lazy:
+                            return pl.scan_parquet(cache_path)
+                        else:
+                            return pl.read_parquet(cache_path)
+                    else:
+                        return pd.read_parquet(cache_path)
+            
             # Download from URL
             try:
                 with st.spinner(f"Downloading {filename}..."):
-                    # Create a temporary file
-                    with tempfile.NamedTemporaryFile(suffix='.parquet', delete=False) as tmp:
-                        response = requests.get(url, stream=True)
-                        response.raise_for_status()
-                        
-                        # Write to temp file
-                        for chunk in response.iter_content(chunk_size=8192):
-                            tmp.write(chunk)
-                        
-                        tmp_path = tmp.name
+                    response = requests.get(url, stream=True)
+                    response.raise_for_status()
                     
-                    # Read from temp file
+                    # Write to cache file
+                    with open(cache_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    
+                    # Read from cache file
                     if use_polars:
                         if lazy:
-                            df = pl.scan_parquet(tmp_path)
+                            df = pl.scan_parquet(cache_path)
                         else:
-                            df = pl.read_parquet(tmp_path)
+                            df = pl.read_parquet(cache_path)
                     else:
-                        df = pd.read_parquet(tmp_path)
-                    
-                    # Clean up temp file
-                    os.unlink(tmp_path)
+                        df = pd.read_parquet(cache_path)
                     
                     return df
                     
