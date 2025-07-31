@@ -1,0 +1,25 @@
+[project]
+name = "data-available-analysis"
+version = "0.1.0"
+dependencies = [
+    "streamlit>=1.29.0",
+    "pandas>=2.1.0",
+    "numpy>=1.25.0",
+    "plotly>=5.18.0",
+    "sqlalchemy>=2.0.0",
+    "clickhouse-sqlalchemy>=0.3.0",
+    "python-dotenv>=1.0.0",
+    "scipy>=1.11.0",
+    "pyarrow>=14.0.0",
+    "polars>=0.20.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["app", "app_offline", "app_offline_polars", "entity_cache", "preprocess_data"]
+
+[tool.uv]
+dev-dependencies = []
