@@ -307,13 +307,6 @@ def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_
     print(f"[DEBUG] process_data_for_analysis called with {len(slots):,} slots", file=sys.stderr)
     log_memory_usage("Start of process_data_for_analysis")
     
-    # Reduce sample size if too large for memory constraints
-    if len(slots) > 50000:  # Reduce from 100k to 50k for memory constraints
-        print(f"[DEBUG] Reducing slot sample from {len(slots):,} to 50,000 for memory constraints", file=sys.stderr)
-        import random
-        random.seed(42)
-        slots = random.sample(slots, 50000)
-    
     # Get entities for slots
     slot_entities = get_entities_for_slots_polars(slots, _entities_df, _proposers_df)
     
@@ -323,8 +316,8 @@ def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_
     
     # Process beacon data - filter for clients starting with 'pub'
     print(f"[DEBUG] Processing beacon data...", file=sys.stderr)
-    # Process in chunks to avoid memory issues
-    chunk_size = 10000
+    # Process in smaller chunks to avoid memory issues
+    chunk_size = 5000  # Smaller chunks for better memory management
     beacon_chunks = []
     
     for i in range(0, len(slots), chunk_size):
@@ -346,10 +339,28 @@ def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_
             .collect(streaming=True)  # Use streaming for better memory efficiency
         )
         beacon_chunks.append(chunk_data)
+        
+        # Write chunk to disk and keep only reference
+        if os.path.exists('/tmp') and os.access('/tmp', os.W_OK):
+            chunk_path = f'/tmp/beacon_chunk_{i//chunk_size}.parquet'
+            chunk_data.write_parquet(chunk_path)
+            beacon_chunks[-1] = chunk_path  # Replace with path
+        
         gc.collect()  # Force garbage collection after each chunk
+        log_memory_usage(f"After beacon chunk {i//chunk_size + 1}")
     
-    # Combine chunks
-    beacon_processed = pl.concat(beacon_chunks) if beacon_chunks else pl.DataFrame()
+    # Combine chunks - read from disk if needed
+    if beacon_chunks and isinstance(beacon_chunks[0], str):
+        # Read chunks from disk
+        beacon_dfs = []
+        for chunk_path in beacon_chunks:
+            beacon_dfs.append(pl.read_parquet(chunk_path))
+            os.unlink(chunk_path)  # Delete after reading
+        beacon_processed = pl.concat(beacon_dfs) if beacon_dfs else pl.DataFrame()
+        del beacon_dfs
+    else:
+        beacon_processed = pl.concat(beacon_chunks) if beacon_chunks else pl.DataFrame()
+    
     del beacon_chunks  # Free memory
     gc.collect()
     
@@ -378,10 +389,28 @@ def process_data_for_analysis(_beacon_lazy, _gossipsub_lazy, slots, _ultrasound_
             .collect(streaming=True)  # Use streaming for better memory efficiency
         )
         gossipsub_chunks.append(chunk_data)
+        
+        # Write chunk to disk and keep only reference
+        if os.path.exists('/tmp') and os.access('/tmp', os.W_OK):
+            chunk_path = f'/tmp/gossipsub_chunk_{i//chunk_size}.parquet'
+            chunk_data.write_parquet(chunk_path)
+            gossipsub_chunks[-1] = chunk_path  # Replace with path
+        
         gc.collect()  # Force garbage collection after each chunk
+        log_memory_usage(f"After gossipsub chunk {i//chunk_size + 1}")
     
-    # Combine chunks
-    gossipsub_processed = pl.concat(gossipsub_chunks) if gossipsub_chunks else pl.DataFrame()
+    # Combine chunks - read from disk if needed
+    if gossipsub_chunks and isinstance(gossipsub_chunks[0], str):
+        # Read chunks from disk
+        gossipsub_dfs = []
+        for chunk_path in gossipsub_chunks:
+            gossipsub_dfs.append(pl.read_parquet(chunk_path))
+            os.unlink(chunk_path)  # Delete after reading
+        gossipsub_processed = pl.concat(gossipsub_dfs) if gossipsub_dfs else pl.DataFrame()
+        del gossipsub_dfs
+    else:
+        gossipsub_processed = pl.concat(gossipsub_chunks) if gossipsub_chunks else pl.DataFrame()
+    
     del gossipsub_chunks  # Free memory
     gc.collect()
     
@@ -419,9 +448,9 @@ def create_cdf_chart_polars(data_pl, title_prefix):
         return fig
     
     # Sample data if too large to avoid memory issues
-    if data_pl.height > 1_000_000:  # If more than 1M rows
-        print(f"[DEBUG] Sampling CDF data from {data_pl.height:,} to 1M rows", file=sys.stderr)
-        data_pl = data_pl.sample(n=1_000_000, seed=42)
+    if data_pl.height > 2_000_000:  # If more than 2M rows
+        print(f"[DEBUG] Sampling CDF data from {data_pl.height:,} to 2M rows", file=sys.stderr)
+        data_pl = data_pl.sample(n=2_000_000, seed=42)
     
     # Calculate total unique contributors/nodes and slots
     # Check if this is beacon data (has contributor format) or libp2p data
@@ -637,8 +666,8 @@ If you're running locally, please ensure either:
     **Gossipsub records:** {metadata['gossipsub_records']:,}
     """)
     
-    # Reduced sample size for memory constraints on Streamlit Cloud
-    sample_size = 50000  # Reduced from 100k to 50k
+    # Fixed sample size of 100k blocks
+    sample_size = 100000
     
     # Random sampling with Polars
     if sample_size < len(data['ultrasound']):
@@ -648,7 +677,7 @@ If you're running locally, please ensure either:
     
     slots = ultrasound_sample['slot'].to_list()
     
-    st.sidebar.info(f"Analyzing {len(slots):,} blocks from Ultrasound relay\n\n_Note: Sample size reduced from 100k to 50k for cloud deployment memory constraints_")
+    st.sidebar.info(f"Analyzing {len(slots):,} blocks from Ultrasound relay")
     
     # Option to focus on solo stakers
     focus_solo = st.sidebar.checkbox(
@@ -673,7 +702,7 @@ If you're running locally, please ensure either:
     # Process data efficiently with Polars
     log_memory_usage("Before processing data")
     print(f"[DEBUG] Processing {len(slots):,} slots", file=sys.stderr)
-    with st.spinner("Processing data with Polars..."):
+    with st.spinner(f"Processing {len(slots):,} blocks... This may take a minute on cloud deployment."):
         beacon_data, gossipsub_data = process_data_for_analysis(
             data['beacon'], 
             data['gossipsub'], 
